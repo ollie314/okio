@@ -25,6 +25,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
+import org.junit.runners.Parameterized.Parameter;
+import org.junit.runners.Parameterized.Parameters;
 
 import static okio.TestUtil.assertByteArrayEquals;
 import static okio.TestUtil.assertByteArraysEquals;
@@ -34,56 +36,66 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
 
 @RunWith(Parameterized.class)
-public class BufferedSourceTest {
-  private static final Factory BUFFER_FACTORY = new Factory() {
-    @Override public Pipe pipe() {
-      Buffer buffer = new Buffer();
-      Pipe result = new Pipe();
-      result.sink = buffer;
-      result.source = buffer;
-      return result;
-    }
+public final class BufferedSourceTest {
+  interface Factory {
+    Factory BUFFER = new Factory() {
+      @Override public Pipe pipe() {
+        Buffer buffer = new Buffer();
+        Pipe result = new Pipe();
+        result.sink = buffer;
+        result.source = buffer;
+        return result;
+      }
 
-    @Override public String toString() {
-      return "Buffer";
-    }
-  };
+      @Override public String toString() {
+        return "Buffer";
+      }
+    };
 
-  private static final Factory REAL_BUFFERED_SOURCE_FACTORY = new Factory() {
-    @Override public Pipe pipe() {
-      Buffer buffer = new Buffer();
-      Pipe result = new Pipe();
-      result.sink = buffer;
-      result.source = new RealBufferedSource(buffer);
-      return result;
-    }
+    Factory REAL_BUFFERED_SOURCE = new Factory() {
+      @Override public Pipe pipe() {
+        Buffer buffer = new Buffer();
+        Pipe result = new Pipe();
+        result.sink = buffer;
+        result.source = new RealBufferedSource(buffer);
+        return result;
+      }
 
-    @Override public String toString() {
-      return "RealBufferedSource";
-    }
-  };
+      @Override public String toString() {
+        return "RealBufferedSource";
+      }
+    };
 
-  private static final Factory ONE_BYTE_AT_A_TIME_FACTORY = new Factory() {
-    @Override public Pipe pipe() {
-      Buffer buffer = new Buffer();
-      Pipe result = new Pipe();
-      result.sink = buffer;
-      result.source = new RealBufferedSource(new ForwardingSource(buffer) {
-        @Override public long read(Buffer sink, long byteCount) throws IOException {
-          return super.read(sink, Math.min(byteCount, 1L));
-        }
-      });
-      return result;
-    }
+    /**
+     * A factory deliberately written to create buffers whose internal segments are always 1 byte
+     * long. We like testing with these segments because are likely to trigger bugs!
+     */
+    Factory ONE_BYTE_AT_A_TIME = new Factory() {
+      @Override public Pipe pipe() {
+        Buffer buffer = new Buffer();
+        Pipe result = new Pipe();
+        result.sink = buffer;
+        result.source = new RealBufferedSource(new ForwardingSource(buffer) {
+          @Override public long read(Buffer sink, long byteCount) throws IOException {
+            // This reads a byte into a new buffer, then clones it so that the segments are shared.
+            // Shared segments cannot be compacted so we'll get a long chain of short segments.
+            Buffer box = new Buffer();
+            long result = super.read(box, Math.min(byteCount, 1L));
+            if (result > 0L) sink.write(box.clone(), result);
+            return result;
+          }
+        });
+        return result;
+      }
 
-    @Override public String toString() {
-      return "OneByteAtATime";
-    }
-  };
+      @Override public String toString() {
+        return "OneByteAtATime";
+      }
+    };
 
-  private interface Factory {
     Pipe pipe();
   }
 
@@ -92,16 +104,15 @@ public class BufferedSourceTest {
     BufferedSource source;
   }
 
-  @Parameterized.Parameters(name = "{0}")
+  @Parameters(name = "{0}")
   public static List<Object[]> parameters() {
     return Arrays.asList(
-        new Object[] { BUFFER_FACTORY },
-        new Object[] { REAL_BUFFERED_SOURCE_FACTORY },
-        new Object[] { ONE_BYTE_AT_A_TIME_FACTORY });
+        new Object[] { Factory.BUFFER},
+        new Object[] { Factory.REAL_BUFFERED_SOURCE},
+        new Object[] { Factory.ONE_BYTE_AT_A_TIME});
   }
 
-  @Parameterized.Parameter
-  public Factory factory;
+  @Parameter public Factory factory;
   private BufferedSink sink;
   private BufferedSource source;
 
@@ -295,7 +306,7 @@ public class BufferedSourceTest {
 
     byte[] sink = new byte[3];
     int read = source.read(sink);
-    if (factory == ONE_BYTE_AT_A_TIME_FACTORY) {
+    if (factory == Factory.ONE_BYTE_AT_A_TIME) {
       assertEquals(1, read);
       byte[] expected = { 'a', 0, 0 };
       assertByteArraysEquals(expected, sink);
@@ -311,7 +322,7 @@ public class BufferedSourceTest {
 
     byte[] sink = new byte[5];
     int read = source.read(sink);
-    if (factory == ONE_BYTE_AT_A_TIME_FACTORY) {
+    if (factory == Factory.ONE_BYTE_AT_A_TIME) {
       assertEquals(1, read);
       byte[] expected = { 'a', 0, 0, 0, 0 };
       assertByteArraysEquals(expected, sink);
@@ -327,7 +338,7 @@ public class BufferedSourceTest {
 
     byte[] sink = new byte[7];
     int read = source.read(sink, 2, 3);
-    if (factory == ONE_BYTE_AT_A_TIME_FACTORY) {
+    if (factory == Factory.ONE_BYTE_AT_A_TIME) {
       assertEquals(1, read);
       byte[] expected = { 0, 0, 'a', 0, 0, 0, 0 };
       assertByteArraysEquals(expected, sink);
@@ -457,7 +468,7 @@ public class BufferedSourceTest {
     assertEquals(-1, source.indexOf((byte) 'e'));
   }
 
-  @Test public void indexOfWithOffset() throws IOException {
+  @Test public void indexOfByteWithOffset() throws IOException {
     sink.writeUtf8("a").writeUtf8(repeat('b', Segment.SIZE)).writeUtf8("c");
     assertEquals(-1, source.indexOf((byte) 'a', 1));
     assertEquals(15, source.indexOf((byte) 'b', 15));
@@ -473,6 +484,30 @@ public class BufferedSourceTest {
     // Make sure we backtrack and resume searching after partial match.
     sink.writeUtf8("hi hi hi hey");
     assertEquals(3, source.indexOf(ByteString.encodeUtf8("hi hi hey")));
+  }
+
+  @Test public void indexOfByteStringAtSegmentBoundary() throws IOException {
+    sink.writeUtf8(repeat('a', Segment.SIZE - 1));
+    sink.writeUtf8("bcd");
+    assertEquals(Segment.SIZE - 3, source.indexOf(ByteString.encodeUtf8("aabc"), Segment.SIZE - 4));
+    assertEquals(Segment.SIZE - 3, source.indexOf(ByteString.encodeUtf8("aabc"), Segment.SIZE - 3));
+    assertEquals(Segment.SIZE - 2, source.indexOf(ByteString.encodeUtf8("abcd"), Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 2, source.indexOf(ByteString.encodeUtf8("abc"),  Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 2, source.indexOf(ByteString.encodeUtf8("abc"),  Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 2, source.indexOf(ByteString.encodeUtf8("ab"),   Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 2, source.indexOf(ByteString.encodeUtf8("a"),    Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 1, source.indexOf(ByteString.encodeUtf8("bc"),   Segment.SIZE - 2));
+    assertEquals(Segment.SIZE - 1, source.indexOf(ByteString.encodeUtf8("b"),    Segment.SIZE - 2));
+    assertEquals(Segment.SIZE,     source.indexOf(ByteString.encodeUtf8("c"),    Segment.SIZE - 2));
+    assertEquals(Segment.SIZE,     source.indexOf(ByteString.encodeUtf8("c"),    Segment.SIZE    ));
+    assertEquals(Segment.SIZE + 1, source.indexOf(ByteString.encodeUtf8("d"),    Segment.SIZE - 2));
+    assertEquals(Segment.SIZE + 1, source.indexOf(ByteString.encodeUtf8("d"),    Segment.SIZE + 1));
+  }
+
+  @Test public void indexOfDoesNotWrapAround() throws IOException {
+    sink.writeUtf8(repeat('a', Segment.SIZE - 1));
+    sink.writeUtf8("bcd");
+    assertEquals(-1, source.indexOf(ByteString.encodeUtf8("abcda"), Segment.SIZE - 3));
   }
 
   @Test public void indexOfByteStringWithOffset() throws IOException {
@@ -500,6 +535,27 @@ public class BufferedSourceTest {
     } catch (IllegalArgumentException e) {
       assertEquals("fromIndex < 0", e.getMessage());
     }
+  }
+
+  /**
+   * With {@link Factory#ONE_BYTE_AT_A_TIME}, this code was extremely slow.
+   * https://github.com/square/okio/issues/171
+   */
+  @Test public void indexOfByteStringAcrossSegmentBoundaries() throws IOException {
+    sink.writeUtf8(repeat('a', Segment.SIZE * 2 - 3));
+    sink.writeUtf8("bcdefg");
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("ab")));
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("abc")));
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("abcd")));
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("abcde")));
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("abcdef")));
+    assertEquals(Segment.SIZE * 2 - 4, source.indexOf(ByteString.encodeUtf8("abcdefg")));
+    assertEquals(Segment.SIZE * 2 - 3, source.indexOf(ByteString.encodeUtf8("bcdefg")));
+    assertEquals(Segment.SIZE * 2 - 2, source.indexOf(ByteString.encodeUtf8("cdefg")));
+    assertEquals(Segment.SIZE * 2 - 1, source.indexOf(ByteString.encodeUtf8("defg")));
+    assertEquals(Segment.SIZE * 2,     source.indexOf(ByteString.encodeUtf8("efg")));
+    assertEquals(Segment.SIZE * 2 + 1, source.indexOf(ByteString.encodeUtf8("fg")));
+    assertEquals(Segment.SIZE * 2 + 2, source.indexOf(ByteString.encodeUtf8("g")));
   }
 
   @Test public void indexOfElement() throws IOException {
@@ -539,7 +595,7 @@ public class BufferedSourceTest {
     InputStream in = source.inputStream();
     byte[] bytes = { 'z', 'z', 'z' };
     int read = in.read(bytes);
-    if (factory == ONE_BYTE_AT_A_TIME_FACTORY) {
+    if (factory == Factory.ONE_BYTE_AT_A_TIME) {
       assertEquals(1, read);
       assertByteArrayEquals("azz", bytes);
 
@@ -563,7 +619,7 @@ public class BufferedSourceTest {
     InputStream in = source.inputStream();
     byte[] bytes = { 'z', 'z', 'z', 'z', 'z' };
     int read = in.read(bytes, 1, 3);
-    if (factory == ONE_BYTE_AT_A_TIME_FACTORY) {
+    if (factory == Factory.ONE_BYTE_AT_A_TIME) {
       assertEquals(1, read);
       assertByteArrayEquals("zazzz", bytes);
     } else {
@@ -577,6 +633,10 @@ public class BufferedSourceTest {
     InputStream in = source.inputStream();
     assertEquals(4, in.skip(4));
     assertEquals('e', in.read());
+
+    sink.writeUtf8("abcde");
+    assertEquals(5, in.skip(10)); // Try to skip too much.
+    assertEquals(0, in.skip(1)); // Try to skip when exhausted.
   }
 
   @Test public void inputStreamCharByChar() throws Exception {
@@ -755,5 +815,148 @@ public class BufferedSourceTest {
     assertLongDecimalString("00000000000000009223372036854775807", 9223372036854775807L);
     assertLongDecimalString("-00000000000000009223372036854775808", -9223372036854775808L);
     assertLongDecimalString(TestUtil.repeat('0', Segment.SIZE + 1) + "1", 1);
+  }
+
+  @Test public void select() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("ROCK"),
+        ByteString.encodeUtf8("SCISSORS"),
+        ByteString.encodeUtf8("PAPER"));
+
+    sink.writeUtf8("PAPER,SCISSORS,ROCK");
+    assertEquals(2, source.select(options));
+    assertEquals(',', source.readByte());
+    assertEquals(1, source.select(options));
+    assertEquals(',', source.readByte());
+    assertEquals(0, source.select(options));
+    assertTrue(source.exhausted());
+  }
+
+  @Test public void selectSpanningMultipleSegments() throws IOException {
+    ByteString commonPrefix = TestUtil.randomBytes(Segment.SIZE + 10);
+    ByteString a = new Buffer().write(commonPrefix).writeUtf8("a").readByteString();
+    ByteString bc = new Buffer().write(commonPrefix).writeUtf8("bc").readByteString();
+    ByteString bd = new Buffer().write(commonPrefix).writeUtf8("bd").readByteString();
+    Options options = Options.of(a, bc, bd);
+
+    sink.write(bd);
+    sink.write(a);
+    sink.write(bc);
+
+    assertEquals(2, source.select(options));
+    assertEquals(0, source.select(options));
+    assertEquals(1, source.select(options));
+    assertTrue(source.exhausted());
+  }
+
+  @Test public void selectNotFound() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("ROCK"),
+        ByteString.encodeUtf8("SCISSORS"),
+        ByteString.encodeUtf8("PAPER"));
+
+    sink.writeUtf8("SPOCK");
+    assertEquals(-1, source.select(options));
+    assertEquals("SPOCK", source.readUtf8());
+  }
+
+  @Test public void selectValuesHaveCommonPrefix() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("abcd"),
+        ByteString.encodeUtf8("abce"),
+        ByteString.encodeUtf8("abcc"));
+
+    sink.writeUtf8("abcc").writeUtf8("abcd").writeUtf8("abce");
+    assertEquals(2, source.select(options));
+    assertEquals(0, source.select(options));
+    assertEquals(1, source.select(options));
+  }
+
+  @Test public void selectLongerThanSource() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("abcd"),
+        ByteString.encodeUtf8("abce"),
+        ByteString.encodeUtf8("abcc"));
+    sink.writeUtf8("abc");
+    assertEquals(-1, source.select(options));
+    assertEquals("abc", source.readUtf8());
+  }
+
+  @Test public void selectReturnsFirstByteStringThatMatches() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("abcd"),
+        ByteString.encodeUtf8("abc"),
+        ByteString.encodeUtf8("abcde"));
+    sink.writeUtf8("abcdef");
+    assertEquals(0, source.select(options));
+    assertEquals("ef", source.readUtf8());
+  }
+
+  @Test public void selectNoByteStrings() throws IOException {
+    Options options = Options.of();
+    sink.writeUtf8("abc");
+    assertEquals(-1, source.select(options));
+  }
+
+  @Test public void selectFromEmptySource() throws IOException {
+    Options options = Options.of(
+        ByteString.encodeUtf8("abc"),
+        ByteString.encodeUtf8("def"));
+    assertEquals(-1, source.select(options));
+  }
+
+  @Test public void selectNoByteStringsFromEmptySource() throws IOException {
+    Options options = Options.of();
+    assertEquals(-1, source.select(options));
+  }
+
+  @Test public void selectEmptyByteString() throws IOException {
+    Options options = Options.of(ByteString.of());
+    sink.writeUtf8("abc");
+    assertEquals(0, source.select(options));
+    assertEquals("abc", source.readUtf8());
+  }
+
+  @Test public void selectEmptyByteStringFromEmptySource() throws IOException {
+    Options options = Options.of(ByteString.of());
+    assertEquals(0, source.select(options));
+  }
+
+  @Test public void rangeEquals() throws IOException {
+    sink.writeUtf8("A man, a plan, a canal. Panama.");
+    assertTrue(source.rangeEquals(7 , ByteString.encodeUtf8("a plan")));
+    assertTrue(source.rangeEquals(0 , ByteString.encodeUtf8("A man")));
+    assertTrue(source.rangeEquals(24, ByteString.encodeUtf8("Panama")));
+    assertFalse(source.rangeEquals(24, ByteString.encodeUtf8("Panama. Panama. Panama.")));
+  }
+
+  @Test public void rangeEqualsWithOffsetAndCount() throws IOException {
+    sink.writeUtf8("A man, a plan, a canal. Panama.");
+    assertTrue(source.rangeEquals(7 , ByteString.encodeUtf8("aaa plannn"), 2, 6));
+    assertTrue(source.rangeEquals(0 , ByteString.encodeUtf8("AAA mannn"), 2, 5));
+    assertTrue(source.rangeEquals(24, ByteString.encodeUtf8("PPPanamaaa"), 2, 6));
+  }
+
+  @Test public void rangeEqualsOnlyReadsUntilMismatch() throws IOException {
+    assumeTrue(factory == Factory.ONE_BYTE_AT_A_TIME); // Other sources read in chunks anyway.
+
+    sink.writeUtf8("A man, a plan, a canal. Panama.");
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A man.")));
+    assertEquals("A man,", source.buffer().readUtf8());
+  }
+
+  @Test public void rangeEqualsArgumentValidation() throws IOException {
+    // Negative source offset.
+    assertFalse(source.rangeEquals(-1, ByteString.encodeUtf8("A")));
+    // Negative bytes offset.
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A"), -1, 1));
+    // Bytes offset longer than bytes length.
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A"), 2, 1));
+    // Negative byte count.
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A"), 0, -1));
+    // Byte count longer than bytes length.
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A"), 0, 2));
+    // Bytes offset plus byte count longer than bytes length.
+    assertFalse(source.rangeEquals(0, ByteString.encodeUtf8("A"), 1, 1));
   }
 }

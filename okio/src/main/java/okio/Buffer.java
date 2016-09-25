@@ -81,7 +81,7 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
       }
 
       @Override public String toString() {
-        return this + ".outputStream()";
+        return Buffer.this + ".outputStream()";
       }
     };
   }
@@ -529,6 +529,43 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
     return new ByteString(readByteArray(byteCount));
   }
 
+  @Override public int select(Options options) {
+    Segment s = head;
+    if (s == null) return options.indexOf(ByteString.EMPTY);
+
+    ByteString[] byteStrings = options.byteStrings;
+    for (int i = 0, listSize = byteStrings.length; i < listSize; i++) {
+      ByteString b = byteStrings[i];
+      if (size >= b.size() && rangeEquals(s, s.pos, b, 0, b.size())) {
+        try {
+          skip(b.size());
+          return i;
+        } catch (EOFException e) {
+          throw new AssertionError(e);
+        }
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Returns the index of a value in {@code options} that is either the prefix of this buffer, or
+   * that this buffer is a prefix of. Unlike {@link #select} this never consumes the value, even
+   * if it is found in full.
+   */
+  int selectPrefix(Options options) {
+    Segment s = head;
+    ByteString[] byteStrings = options.byteStrings;
+    for (int i = 0, listSize = byteStrings.length; i < listSize; i++) {
+      ByteString b = byteStrings[i];
+      int bytesLimit = (int) Math.min(size, b.size());
+      if (bytesLimit == 0 || rangeEquals(s, s.pos, b, 0, bytesLimit)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
   @Override public void readFully(Buffer sink, long byteCount) throws EOFException {
     if (size < byteCount) {
       sink.write(this, size); // Exhaust ourselves.
@@ -607,7 +644,7 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
       Buffer data = new Buffer();
       copyTo(data, 0, Math.min(32, size));
       throw new EOFException("\\n not found: size=" + size()
-          + " content=" + data.readByteString().hex() + "...");
+          + " content=" + data.readByteString().hex() + "…");
     }
     return readUtf8Line(newline);
   }
@@ -921,7 +958,7 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
           "endIndex > string.length: " + endIndex + " > " + string.length());
     }
     if (charset == null) throw new IllegalArgumentException("charset == null");
-    if (charset.equals(Util.UTF_8)) return writeUtf8(string);
+    if (charset.equals(Util.UTF_8)) return writeUtf8(string, beginIndex, endIndex);
     byte[] data = string.substring(beginIndex, endIndex).getBytes(charset);
     return write(data, 0, data.length);
   }
@@ -1233,23 +1270,48 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
   @Override public long indexOf(byte b, long fromIndex) {
     if (fromIndex < 0) throw new IllegalArgumentException("fromIndex < 0");
 
-    Segment s = head;
-    if (s == null) return -1L;
-    long offset = 0L;
-    do {
-      int segmentByteCount = s.limit - s.pos;
-      if (fromIndex >= segmentByteCount) {
-        fromIndex -= segmentByteCount;
-      } else {
-        byte[] data = s.data;
-        for (int pos = (int) (s.pos + fromIndex), limit = s.limit; pos < limit; pos++) {
-          if (data[pos] == b) return offset + pos - s.pos;
+    Segment s;
+    long offset;
+
+    // TODO(jwilson): extract this to a shared helper method when can do so without allocating.
+    findSegmentAndOffset: {
+      // Pick the first segment to scan. This is the first segment with offset <= fromIndex.
+      s = head;
+      if (s == null) {
+        // No segments to scan!
+        return -1L;
+      } else if (size - fromIndex < fromIndex) {
+        // We're scanning in the back half of this buffer. Find the segment starting at the back.
+        offset = size;
+        while (offset > fromIndex) {
+          s = s.prev;
+          offset -= (s.limit - s.pos);
         }
-        fromIndex = 0;
+      } else {
+        // We're scanning in the front half of this buffer. Find the segment starting at the front.
+        offset = 0L;
+        for (long nextOffset; (nextOffset = offset + (s.limit - s.pos)) < fromIndex; ) {
+          s = s.next;
+          offset = nextOffset;
+        }
       }
-      offset += segmentByteCount;
+    }
+
+    // Scan through the segments, searching for b.
+    while (offset < size) {
+      byte[] data = s.data;
+      for (int pos = (int) (s.pos + fromIndex - offset), limit = s.limit; pos < limit; pos++) {
+        if (data[pos] == b) {
+          return pos - s.pos + offset;
+        }
+      }
+
+      // Not in this segment. Try the next one.
+      offset += (s.limit - s.pos);
+      fromIndex = offset;
       s = s.next;
-    } while (s != head);
+    }
+
     return -1L;
   }
 
@@ -1259,16 +1321,57 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
 
   @Override public long indexOf(ByteString bytes, long fromIndex) throws IOException {
     if (bytes.size() == 0) throw new IllegalArgumentException("bytes is empty");
-    while (true) {
-      fromIndex = indexOf(bytes.getByte(0), fromIndex);
-      if (fromIndex == -1) {
-        return -1;
+    if (fromIndex < 0) throw new IllegalArgumentException("fromIndex < 0");
+
+    Segment s;
+    long offset;
+
+    // TODO(jwilson): extract this to a shared helper method when can do so without allocating.
+    findSegmentAndOffset: {
+      // Pick the first segment to scan. This is the first segment with offset <= fromIndex.
+      s = head;
+      if (s == null) {
+        // No segments to scan!
+        return -1L;
+      } else if (size - fromIndex < fromIndex) {
+        // We're scanning in the back half of this buffer. Find the segment starting at the back.
+        offset = size;
+        while (offset > fromIndex) {
+          s = s.prev;
+          offset -= (s.limit - s.pos);
+        }
+      } else {
+        // We're scanning in the front half of this buffer. Find the segment starting at the front.
+        offset = 0L;
+        for (long nextOffset; (nextOffset = offset + (s.limit - s.pos)) < fromIndex; ) {
+          s = s.next;
+          offset = nextOffset;
+        }
       }
-      if (rangeEquals(fromIndex, bytes)) {
-        return fromIndex;
-      }
-      fromIndex++;
     }
+
+    // Scan through the segments, searching for the lead byte. Each time that is found, delegate to
+    // rangeEquals() to check for a complete match.
+    byte b0 = bytes.getByte(0);
+    int bytesSize = bytes.size();
+    long resultLimit = size - bytesSize + 1;
+    while (offset < resultLimit) {
+      // Scan through the current segment.
+      byte[] data = s.data;
+      int segmentLimit = (int) Math.min(s.limit, s.pos + resultLimit - offset);
+      for (int pos = (int) (s.pos + fromIndex - offset); pos < segmentLimit; pos++) {
+        if (data[pos] == b0 && rangeEquals(s, pos + 1, bytes, 1, bytesSize)) {
+          return pos - s.pos + offset;
+        }
+      }
+
+      // Not in this segment. Try the next one.
+      offset += (s.limit - s.pos);
+      fromIndex = offset;
+      s = s.next;
+    }
+
+    return -1L;
   }
 
   @Override public long indexOfElement(ByteString targetBytes) {
@@ -1278,40 +1381,121 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
   @Override public long indexOfElement(ByteString targetBytes, long fromIndex) {
     if (fromIndex < 0) throw new IllegalArgumentException("fromIndex < 0");
 
-    Segment s = head;
-    if (s == null) return -1L;
-    long offset = 0L;
-    byte[] toFind = targetBytes.toByteArray();
-    do {
-      int segmentByteCount = s.limit - s.pos;
-      if (fromIndex >= segmentByteCount) {
-        fromIndex -= segmentByteCount;
+    Segment s;
+    long offset;
+
+    // TODO(jwilson): extract this to a shared helper method when can do so without allocating.
+    findSegmentAndOffset: {
+      // Pick the first segment to scan. This is the first segment with offset <= fromIndex.
+      s = head;
+      if (s == null) {
+        // No segments to scan!
+        return -1L;
+      } else if (size - fromIndex < fromIndex) {
+        // We're scanning in the back half of this buffer. Find the segment starting at the back.
+        offset = size;
+        while (offset > fromIndex) {
+          s = s.prev;
+          offset -= (s.limit - s.pos);
+        }
       } else {
+        // We're scanning in the front half of this buffer. Find the segment starting at the front.
+        offset = 0L;
+        for (long nextOffset; (nextOffset = offset + (s.limit - s.pos)) < fromIndex; ) {
+          s = s.next;
+          offset = nextOffset;
+        }
+      }
+    }
+
+    // Special case searching for one of two bytes. This is a common case for tools like Moshi,
+    // which search for pairs of chars like `\r` and `\n` or {@code `"` and `\`. The impact of this
+    // optimization is a ~5x speedup for this case without a substantial cost to other cases.
+    if (targetBytes.size() == 2) {
+      // Scan through the segments, searching for either of the two bytes.
+      byte b0 = targetBytes.getByte(0);
+      byte b1 = targetBytes.getByte(1);
+      while (offset < size) {
         byte[] data = s.data;
-        for (long pos = s.pos + fromIndex, limit = s.limit; pos < limit; pos++) {
-          byte b = data[(int) pos];
-          for (byte targetByte : toFind) {
-            if (b == targetByte) return offset + pos - s.pos;
+        for (int pos = (int) (s.pos + fromIndex - offset), limit = s.limit; pos < limit; pos++) {
+          int b = data[pos];
+          if (b == b0 || b == b1) {
+            return pos - s.pos + offset;
           }
         }
-        fromIndex = 0;
+
+        // Not in this segment. Try the next one.
+        offset += (s.limit - s.pos);
+        fromIndex = offset;
+        s = s.next;
       }
-      offset += segmentByteCount;
-      s = s.next;
-    } while (s != head);
+    } else {
+      // Scan through the segments, searching for a byte that's also in the array.
+      byte[] targetByteArray = targetBytes.internalArray();
+      while (offset < size) {
+        byte[] data = s.data;
+        for (int pos = (int) (s.pos + fromIndex - offset), limit = s.limit; pos < limit; pos++) {
+          int b = data[pos];
+          for (byte t : targetByteArray) {
+            if (b == t) return pos - s.pos + offset;
+          }
+        }
+
+        // Not in this segment. Try the next one.
+        offset += (s.limit - s.pos);
+        fromIndex = offset;
+        s = s.next;
+      }
+    }
+
     return -1L;
   }
 
-  boolean rangeEquals(long offset, ByteString bytes) {
-    int byteCount = bytes.size();
-    if (size - offset < byteCount) {
+  @Override public boolean rangeEquals(long offset, ByteString bytes) {
+    return rangeEquals(offset, bytes, 0, bytes.size());
+  }
+
+  @Override public boolean rangeEquals(long offset, ByteString bytes, int bytesOffset, int byteCount) {
+    if (offset < 0
+        || bytesOffset < 0
+        || byteCount < 0
+        || size - offset < byteCount
+        || bytes.size() - bytesOffset < byteCount) {
       return false;
     }
     for (int i = 0; i < byteCount; i++) {
-      if (getByte(offset + i) != bytes.getByte(i)) {
+      if (getByte(offset + i) != bytes.getByte(bytesOffset + i)) {
         return false;
       }
     }
+    return true;
+  }
+
+  /**
+   * Returns true if the range within this buffer starting at {@code segmentPos} in {@code segment}
+   * is equal to {@code bytes[bytesOffset..bytesLimit)}.
+   */
+  private boolean rangeEquals(
+      Segment segment, int segmentPos, ByteString bytes, int bytesOffset, int bytesLimit) {
+    int segmentLimit = segment.limit;
+    byte[] data = segment.data;
+
+    for (int i = bytesOffset; i < bytesLimit; ) {
+      if (segmentPos == segmentLimit) {
+        segment = segment.next;
+        data = segment.data;
+        segmentPos = segment.pos;
+        segmentLimit = segment.limit;
+      }
+
+      if (data[segmentPos] != bytes.getByte(i)) {
+        return false;
+      }
+
+      segmentPos++;
+      i++;
+    }
+
     return true;
   }
 
@@ -1334,6 +1518,34 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
       result.add(s.limit - s.pos);
     }
     return result;
+  }
+
+  /** Returns the 128-bit MD5 hash of this buffer. */
+  public ByteString md5() {
+    return digest("MD5");
+  }
+
+  /** Returns the 160-bit SHA-1 hash of this buffer. */
+  public ByteString sha1() {
+    return digest("SHA-1");
+  }
+
+  /** Returns the 256-bit SHA-256 hash of this buffer. */
+  public ByteString sha256() {
+    return digest("SHA-256");
+  }
+
+  private ByteString digest(String algorithm) {
+    try {
+      MessageDigest messageDigest = MessageDigest.getInstance(algorithm);
+      messageDigest.update(head.data, head.pos, head.limit - head.pos);
+      for (Segment s = head.next; s != head; s = s.next) {
+        messageDigest.update(s.data, s.pos, s.limit - s.pos);
+      }
+      return ByteString.of(messageDigest.digest());
+    } catch (NoSuchAlgorithmException e) {
+      throw new AssertionError();
+    }
   }
 
   @Override public boolean equals(Object o) {
@@ -1382,27 +1594,12 @@ public final class Buffer implements BufferedSource, BufferedSink, Cloneable {
     return result;
   }
 
+  /**
+   * Returns a human-readable string that describes the contents of this buffer. Typically this
+   * is a string like {@code [text=Hello]} or {@code [hex=0000ffff]}.
+   */
   @Override public String toString() {
-    if (size == 0) {
-      return "Buffer[size=0]";
-    }
-
-    if (size <= 16) {
-      ByteString data = clone().readByteString();
-      return String.format("Buffer[size=%s data=%s]", size, data.hex());
-    }
-
-    try {
-      MessageDigest md5 = MessageDigest.getInstance("MD5");
-      md5.update(head.data, head.pos, head.limit - head.pos);
-      for (Segment s = head.next; s != head; s = s.next) {
-        md5.update(s.data, s.pos, s.limit - s.pos);
-      }
-      return String.format("Buffer[size=%s md5=%s]",
-          size, ByteString.of(md5.digest()).hex());
-    } catch (NoSuchAlgorithmException e) {
-      throw new AssertionError();
-    }
+    return snapshot().toString();
   }
 
   /** Returns a deep copy of this buffer. */

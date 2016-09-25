@@ -110,6 +110,14 @@ public final class GzipSink implements Sink {
     if (thrown != null) Util.sneakyRethrow(thrown);
   }
 
+  /**
+   * Returns the {@link Deflater}.
+   * Use it to access stats, dictionary, compression level, etc.
+   */
+  public Deflater deflater() {
+    return deflater;
+  }
+
   private void writeHeader() {
     // Write the Gzip header directly into the buffer for the sink to avoid handling IOException.
     Buffer buffer = this.sink.buffer();
@@ -123,7 +131,7 @@ public final class GzipSink implements Sink {
 
   private void writeFooter() throws IOException {
     sink.writeIntLe((int) crc.getValue()); // CRC of original data.
-    sink.writeIntLe(deflater.getTotalIn()); // Length of original data.
+    sink.writeIntLe((int) deflater.getBytesRead()); // Length of original data.
   }
 
   /** Updates the CRC with the given bytes. */

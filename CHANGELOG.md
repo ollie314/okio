@@ -1,6 +1,79 @@
 Change Log
 ==========
 
+## Version 1.10.0
+
+_2016-08-28_
+
+ * Fix: Support reading files larger than 2 GiB with `GzipSource`. Previously
+   attempting to decompress such files would fail due to an overflow when
+   validating the total length.
+ * Fix: Exit the watchdog thread after being idle for 60 seconds. This should
+   make it possible for class unloaders to fully unload Okio.
+ * New: `Okio.blackhole()` returns a sink where all bytes written are discarded.
+   This is Okio's equivalent of `/dev/null`.
+ * New: Encode a string with any charset using `ByteString.encodeString()` and
+   decode strings in any charset using `ByteString.string()`. Most applications
+   should prefer `ByteString.encodeUtf8()` and `ByteString.utf8()` unless it's
+   necessary to support a legacy charset.
+ * New: `GzipSink.deflater()` makes it possible to configure the compression
+   level.
+
+
+## Version 1.9.0
+
+_2016-07-01_
+
+ * New: `Pipe` makes it easy to connect a producer thread to a consumer thread.
+   Reads block until data is available to read. Writes block if the pipe's is
+   full. Both sources and sinks support timeouts.
+ * New: `BufferedSource.rangeEquals()` makes it easy to compare a range in a
+   stream to an expected value. This does the right thing: it blocks to load
+   the data required return a definitive result. But it won't block
+   unnecessarily.
+ * New: `Timeout.waitUntilNotified()` makes it possible to use nice timeout
+   abstractions on Java's built-in wait/notify primitives.
+ * Fix: Don't return incorrect results when `HashingSource` does large reads.
+   There was a bug where it wasn't traversing through the segments of the buffer
+   being hashed. This means that `HashingSource` was returning incorrect answers
+   for any writes that spanned multiple segment boundaries.
+
+## Version 1.8.0
+
+_2016-05-02_
+
+ * New: `BufferedSource.select(Options)` API for reading one of a set of
+   expected values.
+ * New: Make `ByteString.toString()` and `Buffer.toString()` friendlier.
+   These methods return text if the byte string is valid UTF-8.
+ * New: APIs to match byte strings: `indexOf()`, `startsWith()`, and
+   `endsWith()`.
+
+## Version 1.7.0
+
+_2016-04-10_
+
+ * New: Change the segment size to 8 KiB. This has been reported to dramatically
+   improve performance in some applications.
+ * New: `md5()`, `sha1()`, and `sha256()` methods on `Buffer`. Also add a
+   `sha1()` method on `ByteString` for symmetry.
+ * New: `HashingSource` and `HashingSink`. These classes are Okio’s equivalent
+   to the JDK’s `DigestInputStream` and `DigestOutputStream`. They offer
+   convenient `md5()`, `sha1()`, and `sha256()` factory methods to avoid an
+   impossible `NoSuchAlgorithmException`.
+ * New: `ByteString.asByteBuffer()`.
+ * Fix: Limit snapshot byte strings to requested size.
+ * Fix: Change write timeouts to have a maximum write size. Previously large
+   writes could easly suffer timeouts because the entire write was subject to a
+   single timeout.
+ * Fix: Recover from EBADF failures, which could be triggered by asynchronously
+   closing a stream on older versions of Android.
+ * Fix: Don't share segments if doing so only saves a small copy. This should
+   improve performance for all applications.
+ * Fix: Optimize `BufferedSource.indexOfElement()` and `indexOf(ByteString)`.
+   Previously this method had a bug that caused it to be very slow on large
+   buffers.
+
 ## Version 1.6.0
 
 _2015-08-25_

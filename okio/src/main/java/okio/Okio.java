@@ -47,7 +47,6 @@ public final class Okio {
    * you read a source to get an ergonomic and efficient access to data.
    */
   public static BufferedSource buffer(Source source) {
-    if (source == null) throw new IllegalArgumentException("source == null");
     return new RealBufferedSource(source);
   }
 
@@ -57,7 +56,6 @@ public final class Okio {
    * get an ergonomic and efficient access to data.
    */
   public static BufferedSink buffer(Sink sink) {
-    if (sink == null) throw new IllegalArgumentException("sink == null");
     return new RealBufferedSink(sink);
   }
 
@@ -192,6 +190,23 @@ public final class Okio {
   public static Sink sink(Path path, OpenOption... options) throws IOException {
     if (path == null) throw new IllegalArgumentException("path == null");
     return sink(Files.newOutputStream(path, options));
+  }
+
+  /** Returns a sink that writes nowhere. */
+  public static Sink blackhole() {
+    return new Sink() {
+      @Override public void write(Buffer source, long byteCount) throws IOException {
+        source.skip(byteCount);
+      }
+
+      @Override public void flush() throws IOException {}
+
+      @Override public Timeout timeout() {
+        return Timeout.NONE;
+      }
+
+      @Override public void close() throws IOException {}
+    };
   }
 
   /**

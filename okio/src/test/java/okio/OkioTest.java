@@ -127,4 +127,32 @@ public final class OkioTest {
     } catch (IllegalArgumentException expected) {
     }
   }
+
+  @Test public void bufferSinkThrowsOnNull() {
+    try {
+      Okio.buffer((Sink) null);
+      fail();
+    } catch (NullPointerException expected) {
+      assertEquals("sink == null", expected.getMessage());
+    }
+  }
+
+  @Test public void bufferSourceThrowsOnNull() {
+    try {
+      Okio.buffer((Source) null);
+      fail();
+    } catch (NullPointerException expected) {
+      assertEquals("source == null", expected.getMessage());
+    }
+  }
+
+  @Test public void blackhole() throws Exception {
+    Buffer data = new Buffer();
+    data.writeUtf8("blackhole");
+
+    Sink blackhole = Okio.blackhole();
+    blackhole.write(data, 5);
+
+    assertEquals("hole", data.readUtf8());
+  }
 }

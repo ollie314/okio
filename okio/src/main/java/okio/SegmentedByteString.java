@@ -18,6 +18,7 @@ package okio;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.util.Arrays;
 
 import static okio.Util.arrayRangeEquals;
@@ -89,6 +90,10 @@ final class SegmentedByteString extends ByteString {
     return toByteString().utf8();
   }
 
+  @Override public String string(Charset charset) {
+    return toByteString().string(charset);
+  }
+
   @Override public String base64() {
     return toByteString().base64();
   }
@@ -107,6 +112,10 @@ final class SegmentedByteString extends ByteString {
 
   @Override public ByteString md5() {
     return toByteString().md5();
+  }
+
+  @Override public ByteString sha1() {
+    return toByteString().sha1();
   }
 
   @Override public ByteString sha256() {
@@ -191,7 +200,7 @@ final class SegmentedByteString extends ByteString {
 
   @Override public boolean rangeEquals(
       int offset, ByteString other, int otherOffset, int byteCount) {
-    if (offset > size() - byteCount) return false;
+    if (offset < 0 || offset > size() - byteCount) return false;
     // Go segment-by-segment through this, passing arrays to other's rangeEquals().
     for (int s = segment(offset); byteCount > 0; s++) {
       int segmentOffset = s == 0 ? 0 : directory[s - 1];
@@ -208,7 +217,10 @@ final class SegmentedByteString extends ByteString {
   }
 
   @Override public boolean rangeEquals(int offset, byte[] other, int otherOffset, int byteCount) {
-    if (offset > size() - byteCount || otherOffset > other.length - byteCount) return false;
+    if (offset < 0 || offset > size() - byteCount
+        || otherOffset < 0 || otherOffset > other.length - byteCount) {
+      return false;
+    }
     // Go segment-by-segment through this, comparing ranges of arrays.
     for (int s = segment(offset); byteCount > 0; s++) {
       int segmentOffset = s == 0 ? 0 : directory[s - 1];
@@ -224,9 +236,21 @@ final class SegmentedByteString extends ByteString {
     return true;
   }
 
+  @Override public int indexOf(byte[] other, int fromIndex) {
+    return toByteString().indexOf(other, fromIndex);
+  }
+
+  @Override public int lastIndexOf(byte[] other, int fromIndex) {
+    return toByteString().lastIndexOf(other, fromIndex);
+  }
+
   /** Returns a copy as a non-segmented byte string. */
   private ByteString toByteString() {
     return new ByteString(toByteArray());
+  }
+
+  @Override byte[] internalArray() {
+    return toByteArray();
   }
 
   @Override public boolean equals(Object o) {

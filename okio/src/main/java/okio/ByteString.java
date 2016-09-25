@@ -24,6 +24,7 @@ import java.io.OutputStream;
 import java.io.Serializable;
 import java.lang.reflect.Field;
 import java.nio.ByteBuffer;
+import java.nio.charset.Charset;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
@@ -81,6 +82,14 @@ public class ByteString implements Serializable, Comparable<ByteString> {
     return new ByteString(copy);
   }
 
+  public static ByteString of(ByteBuffer data) {
+    if (data == null) throw new IllegalArgumentException("data == null");
+
+    byte[] copy = new byte[data.remaining()];
+    data.get(copy);
+    return new ByteString(copy);
+  }
+
   /** Returns a new byte string containing the {@code UTF-8} bytes of {@code s}. */
   public static ByteString encodeUtf8(String s) {
     if (s == null) throw new IllegalArgumentException("s == null");
@@ -89,11 +98,24 @@ public class ByteString implements Serializable, Comparable<ByteString> {
     return byteString;
   }
 
+  /** Returns a new byte string containing the {@code charset}-encoded bytes of {@code s}. */
+  public static ByteString encodeString(String s, Charset charset) {
+    if (s == null) throw new IllegalArgumentException("s == null");
+    if (charset == null) throw new IllegalArgumentException("charset == null");
+    return new ByteString(s.getBytes(charset));
+  }
+
   /** Constructs a new {@code String} by decoding the bytes as {@code UTF-8}. */
   public String utf8() {
     String result = utf8;
     // We don't care if we double-allocate in racy code.
     return result != null ? result : (utf8 = new String(data, Util.UTF_8));
+  }
+
+  /** Constructs a new {@code String} by decoding the bytes using {@code charset}. */
+  public String string(Charset charset) {
+    if (charset == null) throw new IllegalArgumentException("charset == null");
+    return new String(data, charset);
   }
 
   /**
@@ -105,19 +127,24 @@ public class ByteString implements Serializable, Comparable<ByteString> {
     return Base64.encode(data);
   }
 
-  /** Returns the MD5 hash of this byte string. */
+  /** Returns the 128-bit MD5 hash of this byte string. */
   public ByteString md5() {
     return digest("MD5");
   }
 
-  /** Returns the SHA-256 hash of this byte string. */
+  /** Returns the 160-bit SHA-1 hash of this byte string. */
+  public ByteString sha1() {
+    return digest("SHA-1");
+  }
+
+  /** Returns the 256-bit SHA-256 hash of this byte string. */
   public ByteString sha256() {
     return digest("SHA-256");
   }
 
-  private ByteString digest(String digest) {
+  private ByteString digest(String algorithm) {
     try {
-      return ByteString.of(MessageDigest.getInstance(digest).digest(data));
+      return ByteString.of(MessageDigest.getInstance(algorithm).digest(data));
     } catch (NoSuchAlgorithmException e) {
       throw new AssertionError(e);
     }
@@ -291,6 +318,11 @@ public class ByteString implements Serializable, Comparable<ByteString> {
     return data.clone();
   }
 
+  /** Returns the bytes of this string without a defensive copy. Do not mutate! */
+  byte[] internalArray() {
+    return data;
+  }
+
   /**
    * Returns a {@code ByteBuffer} view of the bytes in this {@code ByteString}.
    */
@@ -324,9 +356,69 @@ public class ByteString implements Serializable, Comparable<ByteString> {
    * out of bounds.
    */
   public boolean rangeEquals(int offset, byte[] other, int otherOffset, int byteCount) {
-    return offset <= data.length - byteCount
-        && otherOffset <= other.length - byteCount
+    return offset >= 0 && offset <= data.length - byteCount
+        && otherOffset >= 0 && otherOffset <= other.length - byteCount
         && arrayRangeEquals(data, offset, other, otherOffset, byteCount);
+  }
+
+  public final boolean startsWith(ByteString prefix) {
+    return rangeEquals(0, prefix, 0, prefix.size());
+  }
+
+  public final boolean startsWith(byte[] prefix) {
+    return rangeEquals(0, prefix, 0, prefix.length);
+  }
+
+  public final boolean endsWith(ByteString prefix) {
+    return rangeEquals(size() - prefix.size(), prefix, 0, prefix.size());
+  }
+
+  public final boolean endsWith(byte[] prefix) {
+    return rangeEquals(size() - prefix.length, prefix, 0, prefix.length);
+  }
+
+  public final int indexOf(ByteString other) {
+    return indexOf(other.internalArray(), 0);
+  }
+
+  public final int indexOf(ByteString other, int fromIndex) {
+    return indexOf(other.internalArray(), fromIndex);
+  }
+
+  public final int indexOf(byte[] other) {
+    return indexOf(other, 0);
+  }
+
+  public int indexOf(byte[] other, int fromIndex) {
+    fromIndex = Math.max(fromIndex, 0);
+    for (int i = fromIndex, limit = data.length - other.length; i <= limit; i++) {
+      if (arrayRangeEquals(data, i, other, 0, other.length)) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  public final int lastIndexOf(ByteString other) {
+    return lastIndexOf(other.internalArray(), size());
+  }
+
+  public final int lastIndexOf(ByteString other, int fromIndex) {
+    return lastIndexOf(other.internalArray(), fromIndex);
+  }
+
+  public final int lastIndexOf(byte[] other) {
+    return lastIndexOf(other, size());
+  }
+
+  public int lastIndexOf(byte[] other, int fromIndex) {
+    fromIndex = Math.min(fromIndex, data.length - other.length);
+    for (int i = fromIndex; i >= 0; i--) {
+      if (arrayRangeEquals(data, i, other, 0, other.length)) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   @Override public boolean equals(Object o) {
@@ -354,16 +446,46 @@ public class ByteString implements Serializable, Comparable<ByteString> {
     return sizeA < sizeB ? -1 : 1;
   }
 
+  /**
+   * Returns a human-readable string that describes the contents of this byte string. Typically this
+   * is a string like {@code [text=Hello]} or {@code [hex=0000ffff]}.
+   */
   @Override public String toString() {
     if (data.length == 0) {
-      return "ByteString[size=0]";
+      return "[size=0]";
     }
 
-    if (data.length <= 16) {
-      return String.format("ByteString[size=%s data=%s]", data.length, hex());
+    String text = utf8();
+    int i = codePointIndexToCharIndex(text, 64);
+
+    if (i == -1) {
+      return data.length <= 64
+          ? "[hex=" + hex() + "]"
+          : "[size=" + data.length + " hex=" + substring(0, 64).hex() + "…]";
     }
 
-    return String.format("ByteString[size=%s md5=%s]", data.length, md5().hex());
+    String safeText = text.substring(0, i)
+        .replace("\\", "\\\\")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r");
+    return i < text.length()
+        ? "[size=" + data.length + " text=" + safeText + "…]"
+        : "[text=" + safeText + "]";
+  }
+
+  static int codePointIndexToCharIndex(String s, int codePointCount) {
+    for (int i = 0, j = 0, length = s.length(), c; i < length; i += Character.charCount(c)) {
+      if (j == codePointCount) {
+        return i;
+      }
+      c = s.codePointAt(i);
+      if ((Character.isISOControl(c) && c != '\n' && c != '\r')
+          || c == Buffer.REPLACEMENT_CHARACTER) {
+        return -1;
+      }
+      j++;
+    }
+    return s.length();
   }
 
   private void readObject(ObjectInputStream in) throws IOException {
